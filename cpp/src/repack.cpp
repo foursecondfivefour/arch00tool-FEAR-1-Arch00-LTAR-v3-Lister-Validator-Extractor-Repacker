@@ -188,6 +188,8 @@ RepackResult repack(const fs::path& source, const fs::path& output, const fs::pa
             else { if(fs::file_size(item.replacement)!=item.size) throw Error("replacement size changed during repack"); std::ifstream replacement(item.replacement,std::ios::binary); if(!replacement) throw Error("cannot reopen replacement"); compare_range(replacement,0,verify,item.new_offset,item.size,control); }
             if (control) ++control->completed;
         }
+        // Windows cannot remove the temporary path while the verification handle is open.
+        verify.close(); if (!verify) throw Error("failed closing verification stream");
         // An atomic hard-link creation fails if the destination already exists.
         if (control) {
             std::lock_guard<std::mutex> lock(control->mutex);

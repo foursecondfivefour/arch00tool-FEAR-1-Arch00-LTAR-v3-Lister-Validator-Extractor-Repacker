@@ -26,6 +26,7 @@ with tempfile.TemporaryDirectory() as tmp:
     rebuilt=root/'repacked.Arch00'
     r=run('repack', source, rebuilt); assert r.returncode==0, r.stderr
     assert 'replaced=0' in r.stdout and source.read_bytes()==original
+    assert not pathlib.Path(str(rebuilt)+'.partial').exists()
     assert run('test',rebuilt).returncode==0
     out=root/'out'
     py=subprocess.run([sys.executable,str(python_tool),'extract',str(rebuilt),str(out)],capture_output=True,text=True)
