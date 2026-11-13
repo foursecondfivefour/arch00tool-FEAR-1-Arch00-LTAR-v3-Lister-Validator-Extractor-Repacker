@@ -31,5 +31,5 @@ void extract(const std::filesystem::path& path, const Archive& archive,
 namespace arch00 {
 struct RepackResult { std::size_t files, replaced; std::uint64_t payload_bytes; };
 RepackResult repack(const std::filesystem::path& source, const std::filesystem::path& output,
-                    const std::filesystem::path& replacements = {});
+                    const std::filesystem::path& replacements = {}, unsigned jobs = 1);
 }

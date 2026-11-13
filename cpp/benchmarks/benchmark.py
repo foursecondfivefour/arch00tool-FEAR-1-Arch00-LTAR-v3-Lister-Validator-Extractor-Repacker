@@ -105,9 +105,6 @@ def main():
         print('Median wall time; throughput is unpacked MiB/s, not disk throughput.')
         for label, command, jobs in implementations:
             for mode in ('test', 'extract', 'repack'):
-                # Repack has no jobs option; avoid reporting the same single-threaded operation twice.
-                if mode == 'repack' and jobs and jobs[-1] != '1':
-                    continue
                 samples = []
                 for iteration in range(args.repeat):
                     target = root / f'result-{iteration}'
@@ -116,7 +113,7 @@ def main():
                     elif mode == 'extract':
                         cmd = command + ['extract', str(archive), str(target)] + jobs
                     else:
-                        cmd = command + ['repack', str(archive), str(target)]
+                        cmd = command + ['repack', str(archive), str(target)] + jobs
                     samples.append(execute(cmd))
                     if mode == 'extract':
                         verify_tree(target, expected)

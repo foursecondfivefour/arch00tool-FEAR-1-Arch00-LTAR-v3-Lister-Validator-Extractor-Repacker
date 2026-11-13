@@ -1,0 +1,32 @@
+name: C++ build and tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / GUI ${{ matrix.gui }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        gui: ['OFF', 'ON']
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Configure
+        run: cmake -S cpp -B cpp/build -DARCH00_BUILD_GUI=${{ matrix.gui }} -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build cpp/build --config Release --parallel 2
+      - name: Test
+        run: ctest --test-dir cpp/build -C Release --output-on-failure

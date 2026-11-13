@@ -28,6 +28,16 @@ try:
         root = pathlib.Path(temp); archive = root/'a.Arch00'
         names=b'folder\0file.txt\0'; offset=48+len(names)+32+16
         archive.write_bytes(struct.pack('<12I', int.from_bytes(b'LTAR','little'),3,len(names),1,1,0,0,0,0,0,0,0)+names+struct.pack('<IQQQI',7,offset,3,3,0)+struct.pack('<IIII',0,0,0,1)+b'abc')
+        browse_body=json.dumps({'path':str(root)}).encode()
+        assert request('/browse', browse_body, {'Content-Type':'application/json','Origin':origin})[0]==403
+        assert request('/browse', browse_body, {**headers,'Origin':'https://example.com'})[0]==403
+        assert request('/browse', browse_body, {**headers,'Host':'evil.example'})[0]==403
+        status,browse_result=request('/browse',browse_body,headers)
+        listing=json.loads(browse_result)
+        assert status==200 and pathlib.Path(listing['path'])==root
+        assert any(item['name']=='a.Arch00' and not item['directory'] for item in listing['entries'])
+        assert request('/browse',json.dumps({'path':str(root/'missing')}).encode(),headers)[0]==400
+        assert request('/browse',json.dumps({'path':'bad\0path'}).encode(),headers)[0]==400
         def action(name, **extra):
             body=json.dumps(dict(action=name,archive=str(archive),**extra)).encode()
             return request('/api',body,headers)
@@ -43,8 +53,9 @@ try:
         out=root/'out'; assert action('extract',output=str(out),jobs=2,compression='auto')[0]==200
         assert (out/'folder'/'file.txt').read_bytes()==b'abc'
         assert action('extract',output=str(out),jobs=2,compression='auto')[0]==400
-        rebuilt=root/'new.Arch00'; assert action('repack',output=str(rebuilt),replace='')[0]==200
+        rebuilt=root/'new.Arch00'; assert action('repack',output=str(rebuilt),replace='',jobs=4)[0]==200
         assert rebuilt.exists()
+        assert action('repack',output=str(root/'invalid.Arch00'),replace='',jobs=65)[0]==400
         assert action('repack',output=str(rebuilt),replace='')[0]==400
         patternout=root/'pattern'; status, result=action('extract',output=str(patternout),jobs=2,pattern='*.dds')
         assert status==200 and 'Extracted 0 files' in json.loads(result)['message']

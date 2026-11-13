@@ -33,8 +33,30 @@ with tempfile.TemporaryDirectory() as tmp:
     for n in (1, 2, 4, 64):
         r=run('test',good,'--jobs',n)
         assert r.returncode==0 and '48 files' in r.stdout, r.stderr
+    sequential=root/'sequential.Arch00'
+    assert run('repack',good,sequential,'--jobs',1).returncode==0
+    mod=root/'mod'/'folder'; mod.mkdir(parents=True)
+    (mod/'0.bin').write_bytes(b'changed' * 1000)
+    (mod/'3.bin').write_bytes(b'')
+    reference=root/'reference.Arch00'
+    assert run('repack',good,reference,'--replace-dir',root/'mod','--jobs',1).returncode==0
+    for n in (2,4,64):
+        rebuilt=root/f'rebuilt{n}.Arch00'
+        r=run('repack',good,rebuilt,'--jobs',n)
+        assert r.returncode==0, r.stderr
+        assert rebuilt.read_bytes()==sequential.read_bytes()
+        assert run('test',rebuilt,'--jobs',n).returncode==0
+        modified=root/f'modified{n}.Arch00'
+        r=run('repack',good,modified,'--replace-dir',root/'mod','--jobs',n)
+        assert r.returncode==0, r.stderr
+        assert 'replaced=2' in r.stdout
+        assert modified.read_bytes()==reference.read_bytes()
+        assert run('test',modified,'--jobs',n).returncode==0
+        rebuilt.unlink(); modified.unlink()
+    sequential.unlink(); reference.unlink()
     for n in ('0','65','-1','foo','9999999999999999999999999999'):
         assert run('test',good,'--jobs',n).returncode==2
+        assert run('repack',good,root/'invalid.Arch00','--jobs',n).returncode==2
     for n in (1, 2, 4, 64):
         out = root/f'out{n}'
         r = run('extract', good, out, '--jobs', n, '-v')
