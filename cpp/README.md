@@ -56,3 +56,7 @@ Measurements include process startup and are influenced by OS caching, CPU, file
 ## Continuous integration and Unicode paths
 
 `.github/workflows/cpp.yml` configures, builds, and runs the C++ tests with and without the optional GUI on Linux and Windows GitHub runners. The Windows CLI receives command-line arguments as UTF-16 and converts them to UTF-8 for the archive core; names printed by the CLI are UTF-8. Automated Unicode-path fixtures cover input, output, patterns, replacements, and batch operations. Windows console font and terminal encoding settings may still affect display. CI does not establish compatibility with actual game archives or test the GUI in an interactive browser.
+
+## Python compatibility checks
+
+The `compatibility` CTest suite generates synthetic LTAR v3 archives and compares Python and C++ validation, extraction, selected patterns, and repacking, including raw/zlib modes, CP1252 names, empty entries, replacement files, and several corrupted streams. Repack outputs are also compared byte-for-byte for the tested fixtures with one and four workers. These are differential tests, not proof of complete behavioral equivalence or game compatibility. Original game archives and unusual path, compression, metadata, and platform cases still need independent validation.
