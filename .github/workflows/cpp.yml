@@ -30,6 +30,9 @@ jobs:
         run: cmake --build cpp/build --config Release --parallel 2
       - name: Test
         run: ctest --test-dir cpp/build -C Release --output-on-failure
+      - name: Report test failures
+        if: failure()
+        run: python cpp/scripts/report_test_failures.py
       - name: Package Linux x86-64
         if: matrix.gui == 'ON' && runner.os == 'Linux'
         run: python cpp/scripts/package.py --build cpp/build --platform linux --output packages/fear-arch00-tool-0.1.0-alpha-linux-x86_64.zip
