@@ -62,21 +62,22 @@ fs::path replacement_path(const fs::path& root, std::string name) {
     }
     if(!any) throw Error("unsafe archive path: " + name); return result;
 }
-void copy_range(std::ifstream& src, std::FILE* dst, std::uint64_t offset, std::uint64_t size) {
+void copy_range(std::ifstream& src, std::FILE* dst, std::uint64_t offset, std::uint64_t size, Control* control) {
     seek(src,offset); std::array<unsigned char,chunk> buffer{};
-    while(size) { auto n=static_cast<std::size_t>(std::min<std::uint64_t>(size,buffer.size())); read_exact(src,buffer.data(),n); write(dst,buffer.data(),n); size-=n; }
+    while(size) { if (control) control->check(); auto n=static_cast<std::size_t>(std::min<std::uint64_t>(size,buffer.size())); read_exact(src,buffer.data(),n); write(dst,buffer.data(),n); size-=n; }
 }
-void compare_range(std::ifstream& a, std::uint64_t offset_a, std::ifstream& b, std::uint64_t offset_b, std::uint64_t size) {
+void compare_range(std::ifstream& a, std::uint64_t offset_a, std::ifstream& b, std::uint64_t offset_b, std::uint64_t size, Control* control) {
     seek(a,offset_a); seek(b,offset_b); std::array<unsigned char,chunk> x{},y{};
-    while(size) { auto n=static_cast<std::size_t>(std::min<std::uint64_t>(size,chunk)); read_exact(a,x.data(),n); read_exact(b,y.data(),n); if(!std::equal(x.begin(),x.begin()+n,y.begin())) throw Error("payload verification failed"); size-=n; }
+    while(size) { if (control) control->check(); auto n=static_cast<std::size_t>(std::min<std::uint64_t>(size,chunk)); read_exact(a,x.data(),n); read_exact(b,y.data(),n); if(!std::equal(x.begin(),x.begin()+n,y.begin())) throw Error("payload verification failed"); size-=n; }
 }
 struct Item { std::uint64_t old_offset, old_size, size, new_offset; fs::path replacement; };
 }
-RepackResult repack(const fs::path& source, const fs::path& output, const fs::path& replacements, unsigned jobs) {
+RepackResult repack(const fs::path& source, const fs::path& output, const fs::path& replacements, unsigned jobs, Control* control) {
+    if (control) { control->check(); control->start_phase("Reading metadata",0); }
     if (jobs < 1 || jobs > 64) throw Error("jobs must be between 1 and 64");
     if (fs::weakly_canonical(source)==fs::weakly_canonical(output)) throw Error("output path must differ from source archive");
     if (fs::exists(output) || fs::is_symlink(output)) throw Error("output already exists");
-    auto parsed=parse(source); auto& h=parsed.header;
+    auto parsed=parse(source); if (control) control->check(); auto& h=parsed.header;
     std::uint64_t metadata_size=48ULL+h.names_size+std::uint64_t(h.file_count)*32+std::uint64_t(h.folder_count)*16;
     std::ifstream src(source,std::ios::binary); if(!src) throw Error("cannot open source archive");
     Bytes metadata(static_cast<std::size_t>(metadata_size)); read_exact(src,metadata.data(),metadata.size());
@@ -104,13 +105,16 @@ RepackResult repack(const fs::path& source, const fs::path& output, const fs::pa
     auto temp=output; temp += ".partial";
     bool owns_temp=false;
     try {
+        if (control) { control->check(); control->start_phase("Repacking",items.size()); }
         auto out=exclusive_file(temp); owns_temp=true;
         write(out.get(),metadata.data(),metadata.size());
         if (jobs==1 || items.size()<2) {
             for(auto index:order) {
+                if (control) control->check();
                 auto& item=items[index];
-                if(item.replacement.empty()) copy_range(src,out.get(),item.old_offset,item.old_size);
-                else { std::ifstream replacement(item.replacement,std::ios::binary); if(!replacement) throw Error("cannot open replacement"); copy_range(replacement,out.get(),0,item.size); }
+                if(item.replacement.empty()) copy_range(src,out.get(),item.old_offset,item.old_size,control);
+                else { std::ifstream replacement(item.replacement,std::ios::binary); if(!replacement) throw Error("cannot open replacement"); copy_range(replacement,out.get(),0,item.size,control); }
+                if (control) ++control->completed;
             }
         } else {
             // Every worker has its own file handles and writes a disjoint range.
@@ -126,7 +130,8 @@ RepackResult repack(const fs::path& source, const fs::path& output, const fs::pa
                     while (!stop.load(std::memory_order_relaxed)) {
                         auto position=next_item.fetch_add(1,std::memory_order_relaxed); if (position>=order.size()) break;
                         const auto& item=items[order[position]];
-                        if (!item.size) continue;
+                        if (control) control->check();
+                        if (!item.size) { if (control) ++control->completed; continue; }
                         std::ifstream replacement;
                         std::ifstream* read_from=&input; auto offset=item.old_offset;
                         if (!item.replacement.empty()) {
@@ -139,12 +144,14 @@ RepackResult repack(const fs::path& source, const fs::path& output, const fs::pa
                         if (!target) throw Error("repack output seek failed");
                         auto remaining=item.size;
                         while (remaining) {
+                            if (control) control->check();
                             auto n=static_cast<std::size_t>(std::min<std::uint64_t>(remaining,buffer.size()));
                             read_exact(*read_from,buffer.data(),n);
                             target.write(reinterpret_cast<const char*>(buffer.data()),static_cast<std::streamsize>(n));
                             if (!target) throw Error("failed writing temporary archive");
                             remaining-=n;
                         }
+                        if (control) ++control->completed;
                     }
                     target.flush(); if (!target) throw Error("failed flushing worker stream");
                     target.close(); if (!target) throw Error("failed closing worker stream");
@@ -167,6 +174,7 @@ RepackResult repack(const fs::path& source, const fs::path& output, const fs::pa
         if(::fsync(fileno(out.get()))!=0) throw Error("failed syncing temporary archive");
 #endif
         if(std::fclose(out.release())!=0) throw Error("failed closing temporary archive");
+        if (control) { control->check(); control->start_phase("Verifying",items.size()); }
         auto rebuilt=parse(temp);
         if(rebuilt.entries.size()!=items.size() || fs::file_size(temp)!=next) throw Error("rebuilt archive size or entry count mismatch");
         std::ifstream verify(temp,std::ios::binary); if(!verify) throw Error("cannot reopen temporary archive");
@@ -175,10 +183,16 @@ RepackResult repack(const fs::path& source, const fs::path& output, const fs::pa
         seek(src,0); Bytes source_now(original_metadata.size()); read_exact(src,source_now.data(),source_now.size());
         if(source_now!=original_metadata) throw Error("source metadata changed during repack");
         for(const auto& item:items) {
-            if(item.replacement.empty()) compare_range(src,item.old_offset,verify,item.new_offset,item.size);
-            else { if(fs::file_size(item.replacement)!=item.size) throw Error("replacement size changed during repack"); std::ifstream replacement(item.replacement,std::ios::binary); if(!replacement) throw Error("cannot reopen replacement"); compare_range(replacement,0,verify,item.new_offset,item.size); }
+            if (control) control->check();
+            if(item.replacement.empty()) compare_range(src,item.old_offset,verify,item.new_offset,item.size,control);
+            else { if(fs::file_size(item.replacement)!=item.size) throw Error("replacement size changed during repack"); std::ifstream replacement(item.replacement,std::ios::binary); if(!replacement) throw Error("cannot reopen replacement"); compare_range(replacement,0,verify,item.new_offset,item.size,control); }
+            if (control) ++control->completed;
         }
         // An atomic hard-link creation fails if the destination already exists.
+        if (control) {
+            std::lock_guard<std::mutex> lock(control->mutex);
+            control->check(); control->publishing=true; control->phase="Publishing";
+        }
         fs::create_hard_link(temp,output);
         std::error_code cleanup_error; fs::remove(temp,cleanup_error); owns_temp=false;
         return {items.size(),replaced,payload_bytes};

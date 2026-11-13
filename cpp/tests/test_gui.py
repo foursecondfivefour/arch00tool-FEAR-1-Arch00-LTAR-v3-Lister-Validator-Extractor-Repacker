@@ -1,4 +1,6 @@
+import concurrent.futures
 import json
+import time
 import pathlib
 import re
 import struct
@@ -78,6 +80,40 @@ try:
         status,result=batch('test-all',jobs=3)
         assert status==400 and 'failed=1' in json.loads(result)['message']
         assert action('not-supported')[0]==400
+        assert request('/status', b'{"request_id":"missing"}', headers)[0]==404
+        assert request('/cancel', b'{"request_id":"missing"}', headers)[0]==404
+        assert request('/cancel', b'{"request_id":"missing"}', {**headers,'Origin':'https://example.com'})[0]==403
+        # A sparse raw payload makes a real operation long enough to request
+        # cancellation without using gigabytes of fixture data on disk.
+        large=root/'large.Arch00'; size=256*1024*1024
+        big_names=b'folder\0big.bin\0second.bin\0'; data_offset=48+len(big_names)+64+16
+        with large.open('wb') as f:
+            f.write(struct.pack('<12I',int.from_bytes(b'LTAR','little'),3,len(big_names),1,2,0,0,0,0,0,0,0)+big_names+struct.pack('<IQQQI',7,data_offset,size,size,0)+struct.pack('<IQQQI',15,data_offset,size,size,0)+struct.pack('<IIII',0,0,0,2))
+            f.truncate(data_offset+size)
+        for mode in ('test','extract','repack'):
+            request_id='cancel-'+mode
+            output=root/('cancel-output-'+mode)
+            payload=json.dumps({'request_id':request_id,'action':mode,'archive':str(large),'output':str(output),'jobs':2}).encode()
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future=pool.submit(request,'/api',payload,headers)
+                found=False
+                for _ in range(100):
+                    status, data=request('/status',json.dumps({'request_id':request_id}).encode(),headers)
+                    if status==200:
+                        info=json.loads(data)
+                        assert 'phase' in info and 'completed' in info and 'total' in info
+                        if info['phase'] in ('Testing','Extracting','Repacking'):
+                            found=True; break
+                    if future.done(): break
+                    time.sleep(0.005)
+                assert found, 'operation finished before status was observed'
+                status, _ = request('/cancel',json.dumps({'request_id':request_id}).encode(),headers)
+                assert status==200
+                code,result=future.result(timeout=30)
+                assert code==409 and 'cancelled' in json.loads(result)['message'].lower(), (code,result)
+                if mode=='repack':
+                    assert not output.exists() and not pathlib.Path(str(output)+'.partial').exists()
+
 finally:
     process.terminate()
     try: process.wait(timeout=5)

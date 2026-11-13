@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-22.04, windows-latest]
         gui: ['OFF', 'ON']
     env:
       PYTHONUTF8: '1'
@@ -30,3 +30,17 @@ jobs:
         run: cmake --build cpp/build --config Release --parallel 2
       - name: Test
         run: ctest --test-dir cpp/build -C Release --output-on-failure
+      - name: Package Linux x86-64
+        if: matrix.gui == 'ON' && runner.os == 'Linux'
+        run: python cpp/scripts/package.py --build cpp/build --platform linux --output packages/fear-arch00-tool-0.1.0-alpha-linux-x86_64.zip
+      - name: Package Windows x86-64
+        if: matrix.gui == 'ON' && runner.os == 'Windows'
+        run: python cpp/scripts/package.py --build cpp/build --platform windows --output packages/fear-arch00-tool-0.1.0-alpha-windows-x86_64.zip
+      - name: Upload tested package
+        if: matrix.gui == 'ON'
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ runner.os }}-x86_64
+          path: packages/*.zip
+          if-no-files-found: error
+          retention-days: 7
