@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -47,3 +47,9 @@ jobs:
           path: packages/*.zip
           if-no-files-found: error
           retention-days: 7
+      # Only the explicitly requested alpha release commit uploads assets.
+      - name: Upload alpha asset to draft release
+        if: matrix.gui == 'ON' && github.event_name == 'push' && github.ref == 'refs/heads/arena/2682f006-arch00tool-fear-1-arch00-ltar' && startsWith(github.event.head_commit.message, '[alpha-release]')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python cpp/scripts/upload_alpha.py
