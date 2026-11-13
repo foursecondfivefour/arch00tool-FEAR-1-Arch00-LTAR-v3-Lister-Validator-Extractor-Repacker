@@ -7,6 +7,10 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <atomic>
+#include <exception>
+#include <mutex>
+#include <thread>
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -68,7 +72,8 @@ void compare_range(std::ifstream& a, std::uint64_t offset_a, std::ifstream& b, s
 }
 struct Item { std::uint64_t old_offset, old_size, size, new_offset; fs::path replacement; };
 }
-RepackResult repack(const fs::path& source, const fs::path& output, const fs::path& replacements) {
+RepackResult repack(const fs::path& source, const fs::path& output, const fs::path& replacements, unsigned jobs) {
+    if (jobs < 1 || jobs > 64) throw Error("jobs must be between 1 and 64");
     if (fs::weakly_canonical(source)==fs::weakly_canonical(output)) throw Error("output path must differ from source archive");
     if (fs::exists(output) || fs::is_symlink(output)) throw Error("output already exists");
     auto parsed=parse(source); auto& h=parsed.header;
@@ -94,16 +99,66 @@ RepackResult repack(const fs::path& source, const fs::path& output, const fs::pa
         auto* record=metadata.data()+48+h.names_size+index*32; put64(record+4,item.new_offset);
         if(!item.replacement.empty()) { put64(record+12,item.size); put64(record+20,item.size); put32(record+28,0); }
     }
+    if (next>static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max())) throw Error("archive size exceeds supported stream offsets");
     if(!output.parent_path().empty()) fs::create_directories(output.parent_path());
     auto temp=output; temp += ".partial";
     bool owns_temp=false;
     try {
         auto out=exclusive_file(temp); owns_temp=true;
         write(out.get(),metadata.data(),metadata.size());
-        for(auto index:order) {
-            auto& item=items[index];
-            if(item.replacement.empty()) copy_range(src,out.get(),item.old_offset,item.old_size);
-            else { std::ifstream replacement(item.replacement,std::ios::binary); if(!replacement) throw Error("cannot open replacement"); copy_range(replacement,out.get(),0,item.size); }
+        if (jobs==1 || items.size()<2) {
+            for(auto index:order) {
+                auto& item=items[index];
+                if(item.replacement.empty()) copy_range(src,out.get(),item.old_offset,item.old_size);
+                else { std::ifstream replacement(item.replacement,std::ios::binary); if(!replacement) throw Error("cannot open replacement"); copy_range(replacement,out.get(),0,item.size); }
+            }
+        } else {
+            // Every worker has its own file handles and writes a disjoint range.
+            if (std::fflush(out.get())!=0) throw Error("failed flushing temporary archive");
+            std::atomic<std::size_t> next_item{0}; std::atomic<bool> stop{false};
+            std::mutex mutex; std::exception_ptr failure;
+            auto work=[&] {
+                try {
+                    std::ifstream input(source,std::ios::binary);
+                    std::fstream target(temp,std::ios::in|std::ios::out|std::ios::binary);
+                    if (!input || !target) throw Error("cannot open repack worker stream");
+                    std::array<unsigned char,chunk> buffer{};
+                    while (!stop.load(std::memory_order_relaxed)) {
+                        auto position=next_item.fetch_add(1,std::memory_order_relaxed); if (position>=order.size()) break;
+                        const auto& item=items[order[position]];
+                        if (!item.size) continue;
+                        std::ifstream replacement;
+                        std::ifstream* read_from=&input; auto offset=item.old_offset;
+                        if (!item.replacement.empty()) {
+                            replacement.open(item.replacement,std::ios::binary);
+                            if (!replacement) throw Error("cannot open replacement");
+                            read_from=&replacement; offset=0;
+                        }
+                        seek(*read_from,offset);
+                        target.seekp(static_cast<std::streamoff>(item.new_offset));
+                        if (!target) throw Error("repack output seek failed");
+                        auto remaining=item.size;
+                        while (remaining) {
+                            auto n=static_cast<std::size_t>(std::min<std::uint64_t>(remaining,buffer.size()));
+                            read_exact(*read_from,buffer.data(),n);
+                            target.write(reinterpret_cast<const char*>(buffer.data()),static_cast<std::streamsize>(n));
+                            if (!target) throw Error("failed writing temporary archive");
+                            remaining-=n;
+                        }
+                    }
+                    target.flush(); if (!target) throw Error("failed flushing worker stream");
+                    target.close(); if (!target) throw Error("failed closing worker stream");
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (!failure) failure=std::current_exception();
+                    stop.store(true,std::memory_order_relaxed);
+                }
+            };
+            std::vector<std::thread> threads;
+            try { for (std::size_t i=0;i<std::min<std::size_t>(jobs,items.size());++i) threads.emplace_back(work); }
+            catch (...) { stop.store(true,std::memory_order_relaxed); for (auto& t:threads) t.join(); throw; }
+            for (auto& t:threads) t.join();
+            if (failure) std::rethrow_exception(failure);
         }
         if(std::fflush(out.get())!=0) throw Error("failed flushing temporary archive");
 #ifdef _WIN32

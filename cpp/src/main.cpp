@@ -7,19 +7,23 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 namespace fs=std::filesystem;
 namespace {
 std::string lower(std::string s) { for (auto& c:s) c=static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; }
 std::vector<fs::path> archive_files(const fs::path& dir) {
     std::vector<fs::path> files;
-    for (const auto& item:fs::directory_iterator(dir)) if (item.is_regular_file() && lower(item.path().extension().string())==".arch00") files.push_back(item.path());
-    std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return lower(a.filename().string())<lower(b.filename().string());});
-    if (files.empty()) throw arch00::Error("no .Arch00 archives found in " + dir.string());
+    for (const auto& item:fs::directory_iterator(dir)) if (item.is_regular_file() && lower(item.path().extension().u8string())==".arch00") files.push_back(item.path());
+    std::sort(files.begin(),files.end(),[](const auto& a,const auto& b){return lower(a.filename().u8string())<lower(b.filename().u8string());});
+    if (files.empty()) throw arch00::Error("no .Arch00 archives found in " + dir.u8string());
     return files;
 }
 void list(const fs::path& path, const arch00::Archive& a, bool verbose) {
     const auto& h=a.header;
-    std::cout << "Archive: " << path.string() << "\nLTAR v" << h.version << "\nNames: " << h.names_size << "; folders: " << h.folder_count << "; file records: " << h.file_count << "\nHeader flags: retail=" << h.retail << " download=" << h.download << " crc=" << h.crc_enabled << "\nGUID bytes: ";
+    std::cout << "Archive: " << path.u8string() << "\nLTAR v" << h.version << "\nNames: " << h.names_size << "; folders: " << h.folder_count << "; file records: " << h.file_count << "\nHeader flags: retail=" << h.retail << " download=" << h.download << " crc=" << h.crc_enabled << "\nGUID bytes: ";
     for (auto c:h.guid) std::cout << std::hex << std::setw(2) << std::setfill('0') << unsigned(c);
     std::cout << std::dec << std::setfill(' ') << '\n';
     for (const auto& e:a.entries) std::cout << e.stored_size << " -> " << e.unpacked_size << " " << (e.compression==0 ? "raw" : "method="+std::to_string(e.compression)) << " " << e.name << '\n';
@@ -33,21 +37,21 @@ int batch(const std::string& cmd, const fs::path& dir, const fs::path& output, b
         if (cmd=="extract-all") {
             final=output / path.filename(); final += ".extracted";
             partial=output / path.filename(); partial += ".extracted.incomplete";
-            if (fs::exists(final)) { if (skip) { ++skipped; std::cerr << "SKIP existing " << final.string() << '\n'; continue; } throw arch00::Error("destination already exists: " + final.string()); }
-            if (fs::exists(partial)) throw arch00::Error("incomplete destination already exists: " + partial.string());
+            if (fs::exists(final)) { if (skip) { ++skipped; std::cerr << "SKIP existing " << final.u8string() << '\n'; continue; } throw arch00::Error("destination already exists: " + final.u8string()); }
+            if (fs::exists(partial)) throw arch00::Error("incomplete destination already exists: " + partial.u8string());
         }
-        std::cerr << "[" << i+1 << "/" << paths.size() << "] " << path.filename().string() << '\n';
+        std::cerr << "[" << i+1 << "/" << paths.size() << "] " << path.filename().u8string() << '\n';
         try {
             auto a=arch00::parse(path);
             if (cmd=="test-all") arch00::test(path,a,raw,false,jobs);
             else { if (!fs::create_directory(partial)) throw arch00::Error("cannot create incomplete directory"); arch00::extract(path,a,partial,raw,verbose,jobs); fs::rename(partial,final); }
-            std::cout << "OK " << path.filename().string() << ": " << a.entries.size() << " files\n";
-        } catch (const std::exception& e) { ++failed; std::cout << "FAIL " << path.filename().string() << ": " << e.what() << '\n'; }
+            std::cout << "OK " << path.filename().u8string() << ": " << a.entries.size() << " files\n";
+        } catch (const std::exception& e) { ++failed; std::cout << "FAIL " << path.filename().u8string() << ": " << e.what() << '\n'; }
     }
     std::cout << "Processed " << paths.size() << " archives; skipped=" << skipped << " failed=" << failed << '\n'; return failed ? 1 : 0;
 }
 }
-int main(int argc, char** argv) {
+int run_cli(int argc, char** argv) {
     if (argc<3) { std::cerr << "Usage: arch00tool-cpp list|test|extract|test-all|extract-all|repack INPUT [OUTPUT] [options]\n"; return 2; }
     try {
         std::string cmd=argv[1], pattern, replace_dir; bool raw=false, verbose=false, skip=false; unsigned jobs=1; int start=3;
@@ -60,7 +64,7 @@ int main(int argc, char** argv) {
             if ((cmd=="list" || cmd=="test" || extracting) && (arg=="-v" || arg=="--verbose")) verbose=true;
             else if (cmd!="list" && cmd!="repack" && arg=="--compression" && i+1<argc) {
                 std::string mode=argv[++i]; if (mode!="auto" && mode!="raw") throw arch00::Error("invalid compression mode"); raw=(mode=="raw");
-            } else if ((cmd=="test" || cmd=="test-all" || extracting) && arg=="--jobs" && i+1<argc) {
+            } else if ((cmd=="test" || cmd=="test-all" || cmd=="repack" || extracting) && arg=="--jobs" && i+1<argc) {
                 std::string value=argv[++i];
                 if (value.empty() || value.size()>2 || value.find_first_not_of("0123456789")!=std::string::npos) throw arch00::Error("jobs must be between 1 and 64");
                 jobs=static_cast<unsigned>(std::stoul(value)); if (jobs<1 || jobs>64) throw arch00::Error("jobs must be between 1 and 64");
@@ -69,7 +73,7 @@ int main(int argc, char** argv) {
             else if (cmd=="extract-all" && arg=="--skip-existing") skip=true;
             else throw arch00::Error("unknown or incomplete option: " + arg);
         }
-        if (cmd=="repack") { auto result=arch00::repack(fs::u8path(argv[2]),fs::u8path(argv[3]),fs::u8path(replace_dir)); std::cout << "Repacked and verified " << result.files << " files (" << result.payload_bytes << " payload bytes); replaced=" << result.replaced << '\n'; return 0; }
+        if (cmd=="repack") { auto result=arch00::repack(fs::u8path(argv[2]),fs::u8path(argv[3]),fs::u8path(replace_dir),jobs); std::cout << "Repacked and verified " << result.files << " files (" << result.payload_bytes << " payload bytes); replaced=" << result.replaced << '\n'; return 0; }
         if (cmd=="test-all" || cmd=="extract-all") return batch(cmd,fs::u8path(argv[2]),extracting ? fs::u8path(argv[3]) : fs::path{},raw,skip,verbose,jobs);
         auto path=fs::u8path(argv[2]); auto a=arch00::parse(path);
         if (cmd=="test") { arch00::test(path,a,raw,verbose,jobs); std::cout << "OK: validated " << a.entries.size() << " files\n"; return 0; }
@@ -80,3 +84,25 @@ int main(int argc, char** argv) {
         list(path,a,verbose); return 0;
     } catch (const std::exception& e) { std::cerr << "error: " << e.what() << '\n'; return 2; }
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv) {
+    try {
+        // Windows passes UTF-16 arguments, regardless of the console code page.
+        std::vector<std::string> utf8; utf8.reserve(static_cast<std::size_t>(argc));
+        for (int i=0; i<argc; ++i) {
+            int size=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[i],-1,nullptr,0,nullptr,nullptr);
+            if (size==0) throw arch00::Error("invalid UTF-16 command-line argument");
+            std::string value(static_cast<std::size_t>(size), '\0');
+            if (!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[i],-1,value.data(),size,nullptr,nullptr)) throw arch00::Error("cannot convert command-line argument to UTF-8");
+            value.pop_back(); utf8.push_back(std::move(value));
+        }
+        std::vector<char*> args; args.reserve(utf8.size());
+        for (auto& value:utf8) args.push_back(value.data());
+        SetConsoleOutputCP(CP_UTF8);
+        return run_cli(argc,args.data());
+    } catch (const std::exception& e) { std::cerr << "error: " << e.what() << '\n'; return 2; }
+}
+#else
+int main(int argc, char** argv) { return run_cli(argc,argv); }
+#endif

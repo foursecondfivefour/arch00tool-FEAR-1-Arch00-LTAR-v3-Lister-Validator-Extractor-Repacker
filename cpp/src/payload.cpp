@@ -28,12 +28,12 @@ using File = std::unique_ptr<std::FILE, int(*)(std::FILE*)>;
 File create_exclusive(const std::filesystem::path& path) {
 #ifdef _WIN32
     int fd = _wopen(path.c_str(), _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY, _S_IREAD | _S_IWRITE);
-    if (fd < 0) throw Error("cannot exclusively create output file: " + path.string());
+    if (fd < 0) throw Error("cannot exclusively create output file: " + path.u8string());
     auto* f = _fdopen(fd, "wb");
     if (!f) { _close(fd); throw Error("cannot open output stream"); }
 #else
     int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0666);
-    if (fd < 0) throw Error("cannot exclusively create output file: " + path.string());
+    if (fd < 0) throw Error("cannot exclusively create output file: " + path.u8string());
     auto* f = fdopen(fd, "wb");
     if (!f) { ::close(fd); throw Error("cannot open output stream"); }
 #endif
@@ -160,13 +160,13 @@ void extract(const std::filesystem::path& path, const Archive& archive, const st
     for (auto entry:order) targets.push_back(destination(output,entry->name).lexically_normal());
     auto sorted=targets; std::sort(sorted.begin(),sorted.end());
     for (std::size_t i=1;i<sorted.size();++i) {
-        if (sorted[i]==sorted[i-1]) throw Error("duplicate extraction target: " + sorted[i].string());
+        if (sorted[i]==sorted[i-1]) throw Error("duplicate extraction target: " + sorted[i].u8string());
     }
     // A target's parent cannot itself be a file target. Check all parents, not
     // adjacent strings, because path sort order does not guarantee adjacency.
     for (const auto& target:sorted) {
         for (auto parent=target.parent_path(); !parent.empty() && parent!=output && parent!=parent.root_path(); parent=parent.parent_path()) {
-            if (std::binary_search(sorted.begin(),sorted.end(),parent)) throw Error("file and directory target conflict: " + parent.string());
+            if (std::binary_search(sorted.begin(),sorted.end(),parent)) throw Error("file and directory target conflict: " + parent.u8string());
         }
     }
     std::filesystem::create_directories(output);
