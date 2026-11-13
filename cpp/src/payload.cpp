@@ -8,6 +8,10 @@
 #include <limits>
 #include <iostream>
 #include <system_error>
+#include <atomic>
+#include <exception>
+#include <mutex>
+#include <thread>
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -94,24 +98,105 @@ std::filesystem::path destination(const std::filesystem::path& root, std::string
     return result;
 }
 }
-void test(const std::filesystem::path& path, const Archive& archive, bool raw_mode, bool verbose) {
-    std::ifstream in(path,std::ios::binary); if (!in) throw Error("cannot open archive");
-    std::size_t count=0;
-    for (const auto& entry:archive.entries) { process(in,entry,nullptr,raw_mode); ++count; if (verbose && entry.stored_size && count%1000==0) std::cerr << "validated " << count << "/" << archive.entries.size() << " entries\n"; }
+void test(const std::filesystem::path& path, const Archive& archive, bool raw_mode, bool verbose, unsigned jobs) {
+    if (jobs < 1 || jobs > 64) throw Error("jobs must be between 1 and 64");
+    if (jobs == 1 || archive.entries.size() < 2) {
+        std::ifstream in(path,std::ios::binary); if (!in) throw Error("cannot open archive");
+        std::size_t count=0;
+        for (const auto& entry:archive.entries) { process(in,entry,nullptr,raw_mode); ++count; if (verbose && entry.stored_size && count%1000==0) std::cerr << "validated " << count << "/" << archive.entries.size() << " entries\n"; }
+        return;
+    }
+    const auto workers=std::min<std::size_t>(jobs,archive.entries.size());
+    std::atomic<std::size_t> next{0}, completed{0};
+    std::atomic<bool> stop{false};
+    std::mutex mutex;
+    std::exception_ptr failure;
+    auto work = [&] {
+        try {
+            std::ifstream in(path,std::ios::binary); if (!in) throw Error("cannot open archive");
+            while (!stop.load(std::memory_order_relaxed)) {
+                auto index=next.fetch_add(1,std::memory_order_relaxed);
+                if (index>=archive.entries.size()) break;
+                process(in,archive.entries[index],nullptr,raw_mode);
+                auto count=completed.fetch_add(1,std::memory_order_relaxed)+1;
+                if (verbose && count%1000==0) {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    std::cerr << "validated " << count << "/" << archive.entries.size() << " entries\n";
+                }
+            }
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!failure) failure=std::current_exception();
+            stop.store(true,std::memory_order_relaxed);
+        }
+    };
+    std::vector<std::thread> threads;
+    try { for (std::size_t i=0;i<workers;++i) threads.emplace_back(work); }
+    catch (...) { stop.store(true,std::memory_order_relaxed); for (auto& t:threads) t.join(); throw; }
+    for (auto& t:threads) t.join();
+    if (failure) std::rethrow_exception(failure);
 }
-void extract(const std::filesystem::path& path, const Archive& archive, const std::filesystem::path& output, bool raw_mode, bool verbose) {
-    std::filesystem::create_directories(output);
-    std::ifstream in(path,std::ios::binary); if (!in) throw Error("cannot open archive");
+
+void extract(const std::filesystem::path& path, const Archive& archive, const std::filesystem::path& output, bool raw_mode, bool verbose, unsigned jobs) {
+    if (jobs < 1 || jobs > 64) throw Error("jobs must be between 1 and 64");
     std::vector<const Entry*> order; for (const auto& e:archive.entries) order.push_back(&e);
     std::stable_sort(order.begin(),order.end(),[](auto a, auto b){ return a->offset<b->offset; });
-    std::size_t index=0;
-    for (auto entry:order) {
-        auto target=destination(output,entry->name);
-        std::filesystem::create_directories(target.parent_path());
-        auto file=create_exclusive(target);
-        process(in,*entry,file.get(),raw_mode);
-        if (std::fflush(file.get()) != 0) throw Error("failed flushing output file");
-        ++index; if (verbose && (index%1000==0 || index==order.size())) std::cerr << "[" << index << "/" << order.size() << "] " << entry->name << '\n';
+    if (jobs==1 || order.size()<2) {
+        std::filesystem::create_directories(output);
+        std::ifstream in(path,std::ios::binary); if (!in) throw Error("cannot open archive");
+        std::size_t index=0;
+        for (auto entry:order) {
+            auto target=destination(output,entry->name);
+            std::filesystem::create_directories(target.parent_path());
+            auto file=create_exclusive(target);
+            process(in,*entry,file.get(),raw_mode);
+            if (std::fflush(file.get()) != 0) throw Error("failed flushing output file");
+            ++index; if (verbose && (index%1000==0 || index==order.size())) std::cerr << "[" << index << "/" << order.size() << "] " << entry->name << '\n';
+        }
+        return;
     }
+    // Reject duplicate normalized targets and file/directory conflicts before any writes.
+    std::vector<std::filesystem::path> targets; targets.reserve(order.size());
+    for (auto entry:order) targets.push_back(destination(output,entry->name).lexically_normal());
+    auto sorted=targets; std::sort(sorted.begin(),sorted.end());
+    for (std::size_t i=1;i<sorted.size();++i) {
+        if (sorted[i]==sorted[i-1]) throw Error("duplicate extraction target: " + sorted[i].string());
+    }
+    // A target's parent cannot itself be a file target. Check all parents, not
+    // adjacent strings, because path sort order does not guarantee adjacency.
+    for (const auto& target:sorted) {
+        for (auto parent=target.parent_path(); !parent.empty() && parent!=output && parent!=parent.root_path(); parent=parent.parent_path()) {
+            if (std::binary_search(sorted.begin(),sorted.end(),parent)) throw Error("file and directory target conflict: " + parent.string());
+        }
+    }
+    std::filesystem::create_directories(output);
+    std::atomic<std::size_t> next{0}, completed{0};
+    std::atomic<bool> stop{false}; std::mutex mutex; std::exception_ptr failure;
+    auto work=[&] {
+        try {
+            std::ifstream in(path,std::ios::binary); if (!in) throw Error("cannot open archive");
+            while (!stop.load(std::memory_order_relaxed)) {
+                auto i=next.fetch_add(1,std::memory_order_relaxed); if (i>=order.size()) break;
+                std::filesystem::create_directories(targets[i].parent_path());
+                auto file=create_exclusive(targets[i]);
+                process(in,*order[i],file.get(),raw_mode);
+                if (std::fflush(file.get())!=0) throw Error("failed flushing output file");
+                auto count=completed.fetch_add(1,std::memory_order_relaxed)+1;
+                if (verbose && (count%1000==0 || count==order.size())) {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    std::cerr << "[" << count << "/" << order.size() << "] " << order[i]->name << '\n';
+                }
+            }
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!failure) failure=std::current_exception();
+            stop.store(true,std::memory_order_relaxed);
+        }
+    };
+    std::vector<std::thread> threads;
+    try { for (std::size_t i=0;i<std::min<std::size_t>(jobs,order.size());++i) threads.emplace_back(work); }
+    catch (...) { stop.store(true,std::memory_order_relaxed); for (auto& t:threads) t.join(); throw; }
+    for (auto& t:threads) t.join();
+    if (failure) std::rethrow_exception(failure);
 }
 }

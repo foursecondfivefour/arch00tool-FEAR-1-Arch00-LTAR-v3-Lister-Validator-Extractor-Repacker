@@ -22,10 +22,10 @@ Archive parse(const std::filesystem::path& path);
 
 namespace arch00 {
 // Validates stored payloads; raw_mode copies stored bytes without decompression.
-void test(const std::filesystem::path& path, const Archive& archive, bool raw_mode = false, bool verbose = false);
+void test(const std::filesystem::path& path, const Archive& archive, bool raw_mode = false, bool verbose = false, unsigned jobs = 1);
 // Extracts all entries; files are created exclusively and are not rolled back on error.
 void extract(const std::filesystem::path& path, const Archive& archive,
-             const std::filesystem::path& output, bool raw_mode = false, bool verbose = false);
+             const std::filesystem::path& output, bool raw_mode = false, bool verbose = false, unsigned jobs = 1);
 }
 
 namespace arch00 {
