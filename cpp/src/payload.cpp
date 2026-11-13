@@ -42,7 +42,8 @@ File create_exclusive(const std::filesystem::path& path) {
 void write_data(std::FILE* file, const unsigned char* data, std::size_t size) {
     if (file && size && std::fwrite(data, 1, size, file) != size) throw Error("failed writing output file");
 }
-void process(std::ifstream& in, const Entry& e, std::FILE* out, bool force_raw) {
+void process(std::ifstream& in, const Entry& e, std::FILE* out, bool force_raw, Control* control) {
+    if (control) control->check();
     if (e.stored_size == 0) {
         if (e.unpacked_size != 0) throw Error(e.name + ": empty stored data with nonzero unpacked size");
         return;
@@ -55,6 +56,7 @@ void process(std::ifstream& in, const Entry& e, std::FILE* out, bool force_raw) 
     std::uint64_t remaining=e.stored_size, total=0;
     if (force_raw || e.compression == 0) {
         while (remaining) {
+            if (control) control->check();
             auto n=static_cast<std::size_t>(std::min<std::uint64_t>(remaining,input.size()));
             if (!in.read(reinterpret_cast<char*>(input.data()),n)) throw Error("truncated payload: " + e.name);
             write_data(out,input.data(),n); remaining-=n;
@@ -66,10 +68,12 @@ void process(std::ifstream& in, const Entry& e, std::FILE* out, bool force_raw) 
     struct Guard { z_stream* s; ~Guard(){ inflateEnd(s); } } guard{&stream};
     bool done=false;
     while (remaining && !done) {
+        if (control) control->check();
         auto n=static_cast<std::size_t>(std::min<std::uint64_t>(remaining,input.size()));
         if (!in.read(reinterpret_cast<char*>(input.data()),n)) throw Error("truncated payload: " + e.name);
         remaining-=n; stream.next_in=input.data(); stream.avail_in=static_cast<uInt>(n);
         do {
+            if (control) control->check();
             stream.next_out=output.data(); stream.avail_out=static_cast<uInt>(output.size());
             int result=inflate(&stream,Z_NO_FLUSH);
             auto produced=output.size()-stream.avail_out;
@@ -98,12 +102,13 @@ std::filesystem::path destination(const std::filesystem::path& root, std::string
     return result;
 }
 }
-void test(const std::filesystem::path& path, const Archive& archive, bool raw_mode, bool verbose, unsigned jobs) {
+void test(const std::filesystem::path& path, const Archive& archive, bool raw_mode, bool verbose, unsigned jobs, Control* control) {
     if (jobs < 1 || jobs > 64) throw Error("jobs must be between 1 and 64");
+    if (control) { control->check(); control->start_phase("Testing",archive.entries.size()); }
     if (jobs == 1 || archive.entries.size() < 2) {
         std::ifstream in(path,std::ios::binary); if (!in) throw Error("cannot open archive");
         std::size_t count=0;
-        for (const auto& entry:archive.entries) { process(in,entry,nullptr,raw_mode); ++count; if (verbose && entry.stored_size && count%1000==0) std::cerr << "validated " << count << "/" << archive.entries.size() << " entries\n"; }
+        for (const auto& entry:archive.entries) { process(in,entry,nullptr,raw_mode,control); ++count; if (control) ++control->completed; if (verbose && entry.stored_size && count%1000==0) std::cerr << "validated " << count << "/" << archive.entries.size() << " entries\n"; }
         return;
     }
     const auto workers=std::min<std::size_t>(jobs,archive.entries.size());
@@ -117,7 +122,8 @@ void test(const std::filesystem::path& path, const Archive& archive, bool raw_mo
             while (!stop.load(std::memory_order_relaxed)) {
                 auto index=next.fetch_add(1,std::memory_order_relaxed);
                 if (index>=archive.entries.size()) break;
-                process(in,archive.entries[index],nullptr,raw_mode);
+                process(in,archive.entries[index],nullptr,raw_mode,control);
+                if (control) ++control->completed;
                 auto count=completed.fetch_add(1,std::memory_order_relaxed)+1;
                 if (verbose && count%1000==0) {
                     std::lock_guard<std::mutex> lock(mutex);
@@ -137,8 +143,9 @@ void test(const std::filesystem::path& path, const Archive& archive, bool raw_mo
     if (failure) std::rethrow_exception(failure);
 }
 
-void extract(const std::filesystem::path& path, const Archive& archive, const std::filesystem::path& output, bool raw_mode, bool verbose, unsigned jobs) {
+void extract(const std::filesystem::path& path, const Archive& archive, const std::filesystem::path& output, bool raw_mode, bool verbose, unsigned jobs, Control* control) {
     if (jobs < 1 || jobs > 64) throw Error("jobs must be between 1 and 64");
+    if (control) { control->check(); control->start_phase("Extracting",archive.entries.size()); }
     std::vector<const Entry*> order; for (const auto& e:archive.entries) order.push_back(&e);
     std::stable_sort(order.begin(),order.end(),[](auto a, auto b){ return a->offset<b->offset; });
     if (jobs==1 || order.size()<2) {
@@ -146,11 +153,13 @@ void extract(const std::filesystem::path& path, const Archive& archive, const st
         std::ifstream in(path,std::ios::binary); if (!in) throw Error("cannot open archive");
         std::size_t index=0;
         for (auto entry:order) {
+            if (control) control->check();
             auto target=destination(output,entry->name);
             std::filesystem::create_directories(target.parent_path());
             auto file=create_exclusive(target);
-            process(in,*entry,file.get(),raw_mode);
+            process(in,*entry,file.get(),raw_mode,control);
             if (std::fflush(file.get()) != 0) throw Error("failed flushing output file");
+            if (control) ++control->completed;
             ++index; if (verbose && (index%1000==0 || index==order.size())) std::cerr << "[" << index << "/" << order.size() << "] " << entry->name << '\n';
         }
         return;
@@ -179,8 +188,9 @@ void extract(const std::filesystem::path& path, const Archive& archive, const st
                 auto i=next.fetch_add(1,std::memory_order_relaxed); if (i>=order.size()) break;
                 std::filesystem::create_directories(targets[i].parent_path());
                 auto file=create_exclusive(targets[i]);
-                process(in,*order[i],file.get(),raw_mode);
+                process(in,*order[i],file.get(),raw_mode,control);
                 if (std::fflush(file.get())!=0) throw Error("failed flushing output file");
+                if (control) ++control->completed;
                 auto count=completed.fetch_add(1,std::memory_order_relaxed)+1;
                 if (verbose && (count%1000==0 || count==order.size())) {
                     std::lock_guard<std::mutex> lock(mutex);

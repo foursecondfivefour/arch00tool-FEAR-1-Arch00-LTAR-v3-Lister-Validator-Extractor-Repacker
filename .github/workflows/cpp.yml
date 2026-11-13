@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-22.04, windows-latest]
         gui: ['OFF', 'ON']
     env:
       PYTHONUTF8: '1'
@@ -30,3 +30,26 @@ jobs:
         run: cmake --build cpp/build --config Release --parallel 2
       - name: Test
         run: ctest --test-dir cpp/build -C Release --output-on-failure
+      - name: Report test failures
+        if: failure()
+        run: python cpp/scripts/report_test_failures.py
+      - name: Package Linux x86-64
+        if: matrix.gui == 'ON' && runner.os == 'Linux'
+        run: python cpp/scripts/package.py --build cpp/build --platform linux --output packages/fear-arch00-tool-0.1.0-alpha-linux-x86_64.zip
+      - name: Package Windows x86-64
+        if: matrix.gui == 'ON' && runner.os == 'Windows'
+        run: python cpp/scripts/package.py --build cpp/build --platform windows --output packages/fear-arch00-tool-0.1.0-alpha-windows-x86_64.zip
+      - name: Upload tested package
+        if: matrix.gui == 'ON'
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ runner.os }}-x86_64
+          path: packages/*.zip
+          if-no-files-found: error
+          retention-days: 7
+      # Only the explicitly requested alpha release commit uploads assets.
+      - name: Upload alpha asset to draft release
+        if: matrix.gui == 'ON' && github.event_name == 'push' && github.ref == 'refs/heads/arena/2682f006-arch00tool-fear-1-arch00-ltar' && startsWith(github.event.head_commit.message, '[alpha-release]')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python cpp/scripts/upload_alpha.py
