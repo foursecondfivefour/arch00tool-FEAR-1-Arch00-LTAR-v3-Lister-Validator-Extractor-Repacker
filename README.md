@@ -1,50 +1,25 @@
+**English | [Русский](docs/ru/README.md)**
+
 # arch00tool
 
-**A read-only lister, validator, extractor — and a safe repacker — for FEAR's `.Arch00` (LTAR v3) archives.**
-
-`arch00tool` is a single-file, dependency-free Python 3 CLI for working with the
-`Arch00` archive format used by *F.E.A.R.* and related Monolith titles. It parses
-the LTAR v3 header, name, file, and folder tables, validates every payload
-(zlib level 1–9 or raw/`compression == 0`), and extracts files while refusing
-unsafe archive paths. A `repack` subcommand rebuilds an archive without
-touching stored payloads, and can optionally substitute individual files from
-an extracted directory — with full metadata round-trip and per-payload SHA-256
-verification before the output is published.
-
----
-
-### Features
-
-- **List** archive contents (names, offsets, stored vs. unpacked sizes, compression mode)
-- **Test** metadata and payload integrity without writing output (`auto` or forced `raw` compression)
-- **Extract** one archive (with optional `fnmatch` pattern) or a whole directory of `.Arch00` files
-- **Repack** an archive byte-for-byte (metadata-preserving) with optional per-file replacement from an extracted tree
-- **Safety by default**
-  - NUL-checked name table, bounded table sizes and entry counts
-  - Strict path-traversal protection (`..`, drive letters, absolute paths, empty segments)
-  - Repack is fully verified (rebuilt tables must equal the originals; each stored payload is hashed)
-  - Never overwrites existing output files or `.partial` temporaries
-- **Zero dependencies** — uses only the Python 3 standard library
-- **Streaming I/O** — 4 MiB chunks, safe for large media entries
-- **Bulk helpers** — `test-all` and `extract-all` for whole-directory workflows
-
----
-
-### Quick start
+A single-file Python utility for listing, validating, extracting, and rebuilding **LTAR v3 / `.Arch00`** archives, including those used by F.E.A.R. It uses only the Python standard library and requires Python 3.10 or newer.
 
 ```bash
-# List contents
 python arch00tool.py list Some.Arch00 -v
+python arch00tool.py test Some.Arch00
+python arch00tool.py extract Some.Arch00 extracted/ --pattern '*.dds'
+python arch00tool.py repack Some.Arch00 Some.modded.Arch00 --replace-dir mod/
+python arch00tool.py test Some.modded.Arch00
+```
 
-# Validate all payloads
-python arch00tool.py test Some.Arch00 -v
+The source archive is not modified. Repacking preserves unchanged file payloads, but **does not necessarily produce a byte-for-byte copy of the whole archive**. Replacement files are stored uncompressed; compatibility with a particular game is not guaranteed. Keep backups.
 
-# Extract a single archive
-python arch00tool.py extract Some.Arch00 out/ --pattern "*.dds" -v
+## Documentation
 
-# Validate / extract every .Arch00 in a directory
-python arch00tool.py test-all ./archives
-python arch00tool.py extract-all ./archives ./extracted --skip-existing
+- [Getting started and modding workflow](docs/en/01-quickstart.md)
+- [Command-line reference](docs/en/02-cli.md)
+- [LTAR v3 layout as implemented](docs/en/03-format.md)
+- [Internals and function reference](docs/en/04-internals.md)
+- [Safety, limitations, and troubleshooting](docs/en/05-safety.md)
 
-# Repack, optionally replacing selected files
-python arch00tool.py repack Some.Arch00 Some.repacked.Arch00 --replace-dir ./mod
+These pages describe the current `arch00tool.py`, not a complete official format specification. Built-in help is available through `python arch00tool.py --help` and `python arch00tool.py <command> --help`.
