@@ -12,7 +12,7 @@ python arch00tool.py repack Some.Arch00 Some.modded.Arch00 --replace-dir mod/
 python arch00tool.py test Some.modded.Arch00
 ```
 
-The source archive is not modified. Repacking preserves unchanged file payloads, but **does not necessarily produce a byte-for-byte copy of the whole archive**. Replacement files are stored uncompressed; compatibility with a particular game is not guaranteed. Keep backups.
+The source archive is not modified. Repacking preserves unchanged file payloads,
 
 ## Documentation
 
